@@ -47,7 +47,7 @@ class ParamGroup:
 class ModelParams(ParamGroup): 
     def __init__(self, parser, sentinel=False):
         self.extent = 0
-        self.sh_degree = 3
+        self.sh_degree = 1
         self._source_path = ""
         self._model_path = ""
         self._output_path = ""
@@ -93,10 +93,10 @@ class OptimizationParams(ParamGroup):
         self.ntc_lr = None
         self.lambda_dxyz = 0.0
         self.lambda_drot= 0.0
-        self.densification_interval = 100
-        self.opacity_reset_interval = 3000
+        self.densification_interval = 300
+        self.opacity_reset_interval = 100000
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 4000
         self.densify_grad_threshold = 0.0002
         self.ntc_conf_path = ""
         self.ntc_path = ""

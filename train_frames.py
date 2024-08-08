@@ -69,7 +69,6 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
         
         loss = torch.tensor(0.).cuda()
         
-        
         # A simple 
         for batch_iteraion in range(opt.batch_size):
         
@@ -98,7 +97,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f} Point count: {gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -171,7 +170,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if (iteration - opt.iterations) % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f} Point count: {gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == opt.iterations + opt.iterations_s2:
                 progress_bar.close()
@@ -194,7 +193,6 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
                 gaussians.optimizer.zero_grad(set_to_none = True)
     s2_end_time=time.time()
     
-    # 计算总训练时间
     pre_time = s1_start_time - start_time
     s1_time = s1_end_time - s1_start_time
     s2_time = s2_end_time - s1_end_time
@@ -278,7 +276,7 @@ def training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, elapsed, test
         return {'last_test_psnr':last_test_psnr.cpu().numpy()
                 , 'last_test_image':last_test_image.cpu()
                 , 'last_points_num':scene.gaussians.get_xyz.shape[0]
-                # , 'last_gt':last_gt.cpu()
+                , 'last_gt':last_gt.cpu()
                 }
 
 def train_one_frame(lp,op,pp,args):
@@ -300,12 +298,14 @@ def train_one_frame(lp,op,pp,args):
         if s1_ress !=[]:
             for idx, s1_res in enumerate(s1_ress):
                 save_tensor_img(s1_res['last_test_image'],os.path.join(args.output_path,f'{idx}_rendering1'))
+
                 res_dict[f'stage1/psnr_{idx}']=s1_res['last_test_psnr']
                 res_dict[f'stage1/points_num_{idx}']=s1_res['last_points_num']
             res_dict[f'stage1/time']=s1_time
         if s2_ress !=[]:
             for idx, s2_res in enumerate(s2_ress):
                 save_tensor_img(s2_res['last_test_image'],os.path.join(args.output_path,f'{idx}_rendering2'))
+                save_tensor_img(s2_res['last_gt'],os.path.join(args.output_path,f'{idx}_gt'))
                 res_dict[f'stage2/psnr_{idx}']=s2_res['last_test_psnr']
                 res_dict[f'stage2/points_num_{idx}']=s2_res['last_points_num']
             res_dict[f'stage2/time']=s2_time
@@ -319,13 +319,16 @@ def train_frames(lp, op, pp, args):
     model_path=args.model_path
     load_iteration = args.load_iteration
     sub_paths = os.listdir(video_path)
-    pattern = re.compile(r'frame(\d+)')
+    pattern = re.compile(r'colmap_(\d+)')
     frames = sorted(
         (item for item in sub_paths if pattern.match(item)),
         key=lambda x: int(pattern.match(x).group(1))
     )
+
+    os.makedirs(os.path.join(output_path, "animation"), exist_ok=True)
+
     frames=frames[args.frame_start:args.frame_end]
-    if args.frame_start==1:
+    if args.frame_start==0:
         args.load_iteration = args.first_load_iteration
     for frame in frames:
         start_time = time.time()
@@ -347,8 +350,8 @@ if __name__ == "__main__":
     pp = PipelineParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
-    parser.add_argument('--frame_start', type=int, default=1)
-    parser.add_argument('--frame_end', type=int, default=150)
+    parser.add_argument('--frame_start', type=int, default=0)
+    parser.add_argument('--frame_end', type=int, default=239)
     parser.add_argument('--load_iteration', type=int, default=None)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
@@ -357,7 +360,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--read_config", action='store_true', default=False)
+    parser.add_argument("--read_config", action='store_true', default=True)
     parser.add_argument("--config_path", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     if args.output_path == "":
@@ -370,6 +373,7 @@ if __name__ == "__main__":
                 setattr(args, key, value)
     serializable_namespace = {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))}
     json_namespace = json.dumps(serializable_namespace)
+    args.output_path = config["output_path"]
     os.makedirs(args.output_path, exist_ok = True)
     with open(os.path.join(args.output_path, "cfg_args.json"), 'w') as f:
         f.write(json_namespace)
