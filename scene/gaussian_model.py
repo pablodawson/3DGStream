@@ -13,6 +13,7 @@ import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, strip_symmetric, build_scaling_rotation, build_rotation, quaternion_multiply
 from utils.debug_utils import save_cal_graph, save_tensor_img
+from utils.loss_utils import l1_loss, quaternion_loss
 from torch import nn
 import os
 from utils.system_utils import mkdir_p
@@ -23,6 +24,12 @@ from utils.graphics_utils import BasicPointCloud
 import tinycudann as tcnn
 from ntc import NeuralTransformationCache
 import commentjson as ctjs
+
+
+from plas import sort_with_plas
+import kornia
+import torch.nn.functional as F
+
 
 class GaussianModel:
 
@@ -37,7 +44,6 @@ class GaussianModel:
                 
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
-
         self.covariance_activation = build_covariance_from_scaling_rotation
         self.rotation_compose = quaternion_multiply
         self.opacity_activation = torch.sigmoid
@@ -160,7 +166,20 @@ class GaussianModel:
         else:
             features_dc = self._features_dc
             features_rest = self._features_rest
-            return torch.cat((features_dc, features_rest), dim=1)  
+            return torch.cat((features_dc, features_rest), dim=1) 
+    
+    @property
+    def get_features_dc(self):
+        if self._new_feature is not None:
+            return self._new_feature
+        elif self._added_features_dc is not None and self._added_features_rest is not None:
+            features_dc = torch.cat((self._features_dc, self._added_features_dc), dim=0)
+            features_rest = torch.cat((self._features_rest, self._added_features_rest), dim=0)
+            return torch.cat((features_dc, features_rest), dim=1)
+        else:
+            features_dc = self._features_dc
+            features_rest = self._features_rest
+            return torch.cat((features_dc, features_rest), dim=1) 
           
     @property
     def get_opacity(self):
@@ -170,6 +189,16 @@ class GaussianModel:
             return self.opacity_activation(torch.cat((self._opacity, self._added_opacity), dim=0))
         else:
             return self.opacity_activation(self._opacity)
+    
+    
+    def get_attr_flat(self, attr_name):
+        attr = getattr(self, f"_{attr_name}")
+        return attr.flatten(start_dim=1)
+
+    def get_activated_attr_flat(self, attr_name):
+        getter_method = f"get_{attr_name}"
+        attr = getattr(self, getter_method)
+        return attr.flatten(start_dim=1)
         
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self.get_rotation)
@@ -549,6 +578,22 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
+    def apply_added_points(self):
+        
+        self._xyz = torch.cat((self._xyz, self._added_xyz), dim=0)
+        self._features_dc = torch.cat((self._features_dc, self._added_features_dc), dim=0)
+        self._features_rest = torch.cat((self._features_rest, self._added_features_rest), dim=0)
+        self._opacity = torch.cat((self._opacity, self._added_opacity), dim=0)
+        self._scaling = torch.cat((self._scaling, self._added_scaling), dim=0)
+        self._rotation = torch.cat((self._rotation, self._added_rotation), dim=0)
+
+        self._added_xyz = None
+        self._added_features_dc = None
+        self._added_features_rest = None
+        self._added_opacity = None
+        self._added_scaling = None
+        self._added_rotation = None
+        
     def prune_added_points(self, min_opacity, extent):
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
@@ -679,7 +724,7 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.color_gradient_accum[update_filter] += torch.norm(self._features_dc.grad[update_filter].squeeze(), dim=-1, keepdim=True)
         self.denom[update_filter] += 1
-    
+
     def query_ntc(self):
         mask, self._d_xyz, self._d_rot = self.ntc(self._xyz)
         
@@ -688,12 +733,6 @@ class GaussianModel:
         if self._rotate_sh == True:
             self._new_feature = torch.cat((self._features_dc, self._features_rest), dim=1) # [N, SHs, RGB]
                     
-            # self._d_rot_matrix=build_rotation(self._d_rot)
-            # self._new_feature[mask][:,1:4,0] = rotate_sh_by_matrix(self._features_rest[mask][...,0],1,self._d_rot_matrix[mask])
-            # self._new_feature[mask][:,1:4,1] = rotate_sh_by_matrix(self._features_rest[mask][...,1],1,self._d_rot_matrix[mask])
-            # self._new_feature[mask][:,1:4,2] = rotate_sh_by_matrix(self._features_rest[mask][...,2],1,self._d_rot_matrix[mask])
-            
-            # This is a bit faster...      
             permuted_feature = self._new_feature.permute(0, 2, 1)[mask] # [N, RGB, SHs]
             reshaped_feature = permuted_feature.reshape(-1,4)
             repeated_quat = self.rotation_activation(self._d_rot[mask]).repeat(3, 1)
@@ -738,7 +777,47 @@ class GaussianModel:
                 self._xyz_bound_max = torch.quantile(self._xyz,1 - half_percentile,dim=0)
             return self._xyz_bound_min, self._xyz_bound_max
 
-    def training_one_frame_setup(self,training_args):
+
+    def cacheloss(self, resi, d_xyz_gt, d_rot_gt, dummy_gt):
+        masked_d_xyz=resi[:,:3]
+        masked_d_rot=resi[:,3:7]
+        masked_dummy=resi[:,7:8]
+
+        loss_xyz=l1_loss(masked_d_xyz,d_xyz_gt)
+        loss_rot=quaternion_loss(masked_d_rot,d_rot_gt)
+        loss_dummy=l1_loss(masked_dummy,dummy_gt)
+        loss=loss_xyz+loss_rot+loss_dummy
+
+        return loss
+    
+    def warmup_ntc_and_save(self, training_args, dataset):
+        
+        print("NTC warm up...")
+
+        normalzied_xyz = self.get_contracted_xyz()
+        mask = (normalzied_xyz >= 0) & (normalzied_xyz <= 1)
+        mask = mask.all(dim=1)
+        ntc_inputs=torch.cat([normalzied_xyz[mask]],dim=-1)
+        
+        noisy_inputs = ntc_inputs + 0.05 * torch.rand_like(ntc_inputs)
+        d_xyz_gt=torch.tensor([0.,0.,0.]).cuda()
+        d_rot_gt=torch.tensor([1.,0.,0.,0.]).cuda()
+        dummy_gt=torch.tensor([1.]).cuda()
+
+        for iteration in range(0,3000):
+            ntc_inputs_w_noisy = torch.cat([noisy_inputs, ntc_inputs, torch.rand_like(ntc_inputs)],dim=0)  
+            ntc_output=self.ntc.model(ntc_inputs_w_noisy).to(torch.float64)
+            loss=self.cacheloss(ntc_output, d_xyz_gt, d_rot_gt, dummy_gt)
+            if iteration % 200 ==0:
+                print(f"NTC warm up loss: {loss}")
+            loss.backward()
+            self.ntc_optimizer.step()
+            self.ntc_optimizer.zero_grad(set_to_none = True)
+        
+        torch.save(self.ntc.state_dict(), os.path.join(os.path.dirname(dataset.output_path), "ntc_init.pth"))
+        print("NTC warm up done.")
+            
+    def training_one_frame_setup(self,training_args, dataset):
         ntc_conf_path=training_args.ntc_conf_path
         with open(ntc_conf_path) as ntc_conf_file:
             ntc_conf = ctjs.load(ntc_conf_file)
@@ -747,18 +826,27 @@ class GaussianModel:
         else:
             model=tcnn.NetworkWithInputEncoding(n_input_dims=3, n_output_dims=8, encoding_config=ntc_conf["encoding"], network_config=ntc_conf["network"]).to(torch.device("cuda"))
         self.ntc=NeuralTransformationCache(model,self.get_xyz_bound()[0],self.get_xyz_bound()[1])
-        self.ntc.load_state_dict(torch.load(training_args.ntc_path))
-        self._xyz_bound_min = self.ntc.xyz_bound_min
-        self._xyz_bound_max = self.ntc.xyz_bound_max
+        
+        ntc_path = os.path.join(os.path.dirname(dataset.output_path), "ntc_init.pth")
+        if os.path.exists(ntc_path):
+            self.ntc.load_state_dict(torch.load(ntc_path))
+        
+        self._xyz_bound_min = torch.tensor(dataset.min_bounds).cuda()
+        self._xyz_bound_max = torch.tensor(dataset.max_bounds).cuda()
+
         if training_args.ntc_lr is not None:
             ntc_lr=training_args.ntc_lr
         else:
             ntc_lr=ntc_conf["optimizer"]["learning_rate"]
+        
         self.ntc_optimizer = torch.optim.Adam(self.ntc.parameters(),
                                                 lr=ntc_lr)            
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.color_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        if not os.path.exists(ntc_path):
+            self.warmup_ntc_and_save(training_args, dataset)
         
     def get_masked_gaussian(self, mask):        
         new_gaussian = GaussianModel(self.max_sh_degree)
@@ -788,4 +876,161 @@ class GaussianModel:
                 repeated_quat = self.rotation_activation(self._d_rot[mask]).repeat(3, 1)
                 rotated_reshaped_feature = rotate_sh_by_quaternion(sh=reshaped_feature[...,1:],l=1,q=repeated_quat) # [3N, SHs(l=1)]
                 rotated_permuted_feature = rotated_reshaped_feature.reshape(-1,3,3) # [N, RGB, SHs(l=1)]
-                self._new_feature[mask][:,1:4]=rotated_permuted_feature.permute(0,2,1)  
+                self._new_feature[mask][:,1:4]=rotated_permuted_feature.permute(0,2,1)
+    
+
+    # -- SSGS implementation --
+
+    def prune_all_but_these_indices(self, indices):
+
+        if self.optimizer is not None and self.optimizer.param_groups[0]["name"]!="added_xyz":
+
+            optimizable_tensors = self._prune_optimizer(indices)
+
+            self._xyz = optimizable_tensors["xyz"]
+            self._features_dc = optimizable_tensors["f_dc"]
+            self._features_rest = optimizable_tensors["f_rest"]
+            self._opacity = optimizable_tensors["opacity"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+            self.xyz_gradient_accum = self.xyz_gradient_accum[indices]
+            self.color_gradient_accum = self.color_gradient_accum[indices]
+            self.denom = self.denom[indices]
+            self.max_radii2D = self.max_radii2D[indices]
+        else:
+            self._xyz = self._xyz[indices]
+            self._features_dc = self._features_dc[indices]
+            self._features_rest = self._features_rest[indices]
+            self._opacity = self._opacity[indices]
+            self._scaling = self._scaling[indices]
+            self._rotation = self._rotation[indices]
+
+    def prune_to_square_shape(self, sort_by_opacity=True, verbose=True):
+        num_gaussians = self._xyz.shape[0]
+
+        self.grid_sidelen = int(np.sqrt(num_gaussians))
+        num_removed = num_gaussians - self.grid_sidelen * self.grid_sidelen
+
+        if verbose:
+            print(f"Removing {num_removed}/{num_gaussians} gaussians to fit the grid. ({100 * num_removed / num_gaussians:.4f}%)")
+        if self.grid_sidelen * self.grid_sidelen < num_gaussians:
+            if sort_by_opacity:
+                alpha = self.get_opacity[:, 0]
+                _, keep_indices = torch.topk(alpha, k=self.grid_sidelen * self.grid_sidelen)
+            else:
+                shuffled_indices = torch.randperm(num_gaussians)
+                keep_indices = shuffled_indices[:self.grid_sidelen * self.grid_sidelen]
+            sorted_keep_indices = torch.sort(keep_indices)[0]
+            self.prune_all_but_these_indices(sorted_keep_indices)
+
+    @staticmethod
+    def normalize(tensor):
+        tensor = tensor - tensor.mean()
+        if tensor.std() > 0:
+            tensor = tensor / tensor.std()
+        return tensor
+
+        
+    def sort_into_grid(self, args, verbose):
+
+        normalization_fn = self.normalize if args.sorting_normalize else lambda x: x
+        attr_getter_fn = self.get_activated_attr_flat if args.sorting_enabled else self.get_attr_flat
+
+        params_to_sort = []
+
+        #for attr_name, attr_weight in sorting_cfg.weights.items():
+        if args.xyz_weight > 0:
+            params_to_sort.append(normalization_fn(attr_getter_fn("xyz")) * args.xyz_weight)
+        if args.features_dc_weight > 0:
+            params_to_sort.append(normalization_fn(attr_getter_fn("features_dc")) * args.features_dc_weight)
+        if args.opacity_weight > 0:
+            params_to_sort.append(normalization_fn(attr_getter_fn("opacity")) * args.opacity_weight)
+        if args.scaling_weight > 0:
+            params_to_sort.append(normalization_fn(attr_getter_fn("scaling")) * args.scaling_weight)
+        if args.rotation_weight > 0:
+            params_to_sort.append(normalization_fn(attr_getter_fn("rotation")) * args.rotation_weight)
+
+        params_to_sort = torch.cat(params_to_sort, dim=1)
+
+        if args.shuffle_sort:
+            shuffled_indices = torch.randperm(params_to_sort.shape[0], device=params_to_sort.device)
+        else:
+            shuffled_indices = torch.arange(params_to_sort.shape[0], device=params_to_sort.device)
+        
+        params_to_sort = params_to_sort[shuffled_indices]
+
+        grid_to_sort = self.as_grid_img(params_to_sort).permute(2, 0, 1)
+        _, sorted_indices = sort_with_plas(grid_to_sort, improvement_break=args.improvement_break, verbose=verbose)
+
+        sorted_indices = sorted_indices.squeeze().flatten()
+
+        sorted_indices = shuffled_indices[sorted_indices]
+
+        self.prune_all_but_these_indices(sorted_indices)
+
+    def as_grid_img(self, tensor):
+        if not hasattr(self, "grid_sidelen"):
+            raise "Gaussians not pruned yet!"
+
+        if self.grid_sidelen * self.grid_sidelen != tensor.shape[0]:
+            raise "Tensor shape does not match img sidelen, needs pruning?"
+
+        img = tensor.reshape((self.grid_sidelen, self.grid_sidelen, -1))
+        return img
+
+    def attr_as_grid_img(self, attr_name):
+        tensor = getattr(self, attr_name)
+        return self.as_grid_img(tensor)
+
+    def set_attr_from_grid_img(self, attr_name, img):
+
+        if self.optimizer is not None:
+            raise "Overwriting Gaussians during training not implemented yet! - Consider pruning method implementations"
+
+        attr_shapes = {
+            "_xyz": (3,),
+            "_features_dc": (1, 3),
+            "_features_rest": (3, 3),
+            "_rotation": (4,),
+            "_scaling": (3,),
+            "_opacity": (1,),
+        }
+
+        target_shape = attr_shapes[attr_name]
+        img_shaped = img.reshape(-1, *target_shape)
+        tensor = torch.tensor(img_shaped, dtype=torch.float, device="cuda")
+
+        setattr(self, attr_name, tensor)
+
+    def neighborloss_2d(self, tensor, args, squeeze_dim=None):
+        if args.neighbor_normalize:
+            tensor = self.normalize(tensor)
+
+        if squeeze_dim:
+            tensor = tensor.squeeze(squeeze_dim)
+
+        img = self.as_grid_img(tensor)
+        img = img.permute(2, 0, 1).unsqueeze(0)
+
+        blurred_x = kornia.filters.gaussian_blur2d(
+            img.detach(),
+            kernel_size=(1, args.neighbor_blur_kernel_size),
+            sigma=(args.neighbor_blur_sigma, args.neighbor_blur_sigma),
+            border_type="circular",
+        )
+
+        blurred_xy = kornia.filters.gaussian_blur2d(
+            blurred_x,
+            kernel_size=(args.neighbor_blur_kernel_size, 1),
+            sigma=(args.neighbor_blur_sigma, args.neighbor_blur_sigma),
+            border_type="reflect",
+        )
+
+        if args.neighbor_loss_fn == "mse":
+            loss = F.mse_loss(blurred_xy, img)
+        elif args.neighbor_loss_fn == "huber":
+            loss = F.huber_loss(blurred_xy, img)
+        else:
+            assert False, "Unknown loss function"
+
+        return loss

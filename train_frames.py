@@ -12,8 +12,8 @@ import time
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim, quaternion_loss, d_xyz_gt, d_rot_gt
-from gaussian_renderer import render, network_gui
+from utils.loss_utils import l1_loss, ssim
+from gaussian_renderer import render
 import sys
 import json
 from scene import Scene, GaussianModel
@@ -31,15 +31,28 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+from utils.system_utils import searchForMaxIteration
+
+
 def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     start_time=time.time()
     last_s1_res = []
     last_s2_res = []
+    
+    testing_iterations += [opt.iterations, opt.iterations + opt.iterations_s2]
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree,opt.rotate_sh)
+    
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
-    gaussians.training_one_frame_setup(opt)
+    gaussians.training_one_frame_setup(opt, dataset)
+
+    gaussians.prune_to_square_shape()
+    #if dataset.sorting_enabled:
+    #    gaussians.prune_to_square_shape()
+    #    gaussians.sort_into_grid(dataset, True)
+    
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -88,6 +101,24 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             Ll1 = l1_loss(image, gt_image)
             Lds = torch.tensor(0.).cuda()
             loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+
+            if opt.lambda_neighbor > 0:
+                nb_losses = []
+                attr_getter_fn = gaussians.get_activated_attr_flat if opt.neighbor_loss_activated else gaussians.get_attr_flat
+                weights = {"xyz": opt.xyz_neighbor_weight, 
+                            "features_dc": opt.features_dc_neighbor_weight, 
+                            "opacity": opt.opacity_neighbor_weight, 
+                            "scaling": opt.scaling_neighbor_weight, 
+                            "rotation": opt.rotation_neighbor_weight}
+                
+                weight_sum = sum(weights.values())
+                for attr_name, attr_weight in weights.items():
+                    if attr_weight > 0:
+                        nb_losses.append(gaussians.neighborloss_2d(attr_getter_fn(attr_name), opt) * attr_weight / weight_sum)
+                
+                nb_loss = opt.lambda_neighbor * sum(nb_losses)
+                loss += nb_loss
+        
             
         loss/=opt.batch_size
         loss.backward()
@@ -97,7 +128,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f} Point count: {gaussians.get_xyz.shape[0]}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]} Nb loss: {nb_loss.item():.{3}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -170,7 +201,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if (iteration - opt.iterations) % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f} Point count: {gaussians.get_xyz.shape[0]}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == opt.iterations + opt.iterations_s2:
                 progress_bar.close()
@@ -186,16 +217,24 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Densification
             if (iteration - opt.iterations) % opt.densification_interval == 0:
                 gaussians.adding_and_prune(opt,scene.cameras_extent)
+                
                              
             # Optimizer step
             if iteration < opt.iterations + opt.iterations_s2:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
+
+    gaussians.apply_added_points()
+    gaussians.prune_to_square_shape()
+    gaussians.sort_into_grid(dataset, True)
+    
     s2_end_time=time.time()
     
     pre_time = s1_start_time - start_time
     s1_time = s1_end_time - s1_start_time
     s2_time = s2_end_time - s1_end_time
+
+    # TODO: Export current frame gaussians as image
            
     return last_s1_res, last_s2_res, pre_time, s1_time, s2_time
 
@@ -281,6 +320,8 @@ def training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, elapsed, test
 
 def train_one_frame(lp,op,pp,args):
     args.save_iterations.append(args.iterations + args.iterations_s2)
+    args.save_iterations.append(args.iterations)
+    
     if args.depth_smooth==0:
         args.bwd_depth=False
     print("Optimizing " + args.output_path)
@@ -309,7 +350,7 @@ def train_one_frame(lp,op,pp,args):
                 res_dict[f'stage2/psnr_{idx}']=s2_res['last_test_psnr']
                 res_dict[f'stage2/points_num_{idx}']=s2_res['last_points_num']
             res_dict[f'stage2/time']=s2_time
-    return res_dict 
+    return res_dict
 
 def train_frames(lp, op, pp, args):
     # Initialize system state (RNG)
@@ -317,7 +358,6 @@ def train_frames(lp, op, pp, args):
     video_path=args.video_path
     output_path=args.output_path
     model_path=args.model_path
-    load_iteration = args.load_iteration
     sub_paths = os.listdir(video_path)
     pattern = re.compile(r'colmap_(\d+)')
     frames = sorted(
@@ -325,20 +365,23 @@ def train_frames(lp, op, pp, args):
         key=lambda x: int(pattern.match(x).group(1))
     )
 
-    os.makedirs(os.path.join(output_path, "animation"), exist_ok=True)
-
     frames=frames[args.frame_start:args.frame_end]
     if args.frame_start==0:
-        args.load_iteration = args.first_load_iteration
+        if args.first_load_iteration!=-1:
+            args.load_iteration = args.first_load_iteration
+        else:
+            args.load_iteration = searchForMaxIteration(os.path.join(model_path, "point_cloud"))
+    
     for frame in frames:
         start_time = time.time()
         args.source_path = os.path.join(video_path, frame)
         args.output_path = os.path.join(output_path, frame)
         args.model_path = model_path
         train_one_frame(lp,op,pp,args)
+        args.load_iteration = args.iterations
         print(f"Frame {frame} finished in {time.time()-start_time} seconds.")
         model_path = args.output_path
-        args.load_iteration = load_iteration
+        
         torch.cuda.empty_cache()
         
 
@@ -348,6 +391,7 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--frame_start', type=int, default=0)
@@ -355,14 +399,16 @@ if __name__ == "__main__":
     parser.add_argument('--load_iteration', type=int, default=None)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1, 50, 100])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1, 50, 100])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--read_config", action='store_true', default=True)
-    parser.add_argument("--config_path", type=str, default = None)
+    parser.add_argument("--config_path", type=str, default = "configs/train/main.json")
+
     args = parser.parse_args(sys.argv[1:])
+    
     if args.output_path == "":
         args.output_path=args.model_path
     if args.read_config and args.config_path is not None:
@@ -371,11 +417,10 @@ if __name__ == "__main__":
         for key, value in config.items():
             if key not in ["output_path", "source_path", "model_path", "video_path", "debug_from"]:
                 setattr(args, key, value)
+    
     serializable_namespace = {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))}
     json_namespace = json.dumps(serializable_namespace)
-    args.output_path = config["output_path"]
     os.makedirs(args.output_path, exist_ok = True)
     with open(os.path.join(args.output_path, "cfg_args.json"), 'w') as f:
         f.write(json_namespace)
-    # train_one_frame(lp,op,pp,args)
     train_frames(lp,op,pp,args)

@@ -36,9 +36,14 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, load_iteration)
     gaussians.training_setup(opt)
+    
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+    
+    if dataset.sorting_enabled:
+        gaussians.prune_to_square_shape()
+        gaussians.sort_into_grid(dataset, True)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -97,6 +102,24 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
             loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
             if(opt.depth_smooth>0):
                 loss+=opt.depth_smooth * Lds
+            
+            if opt.lambda_neighbor > 0:
+                nb_losses = []
+                attr_getter_fn = gaussians.get_activated_attr_flat if opt.neighbor_loss_activated else gaussians.get_attr_flat
+                weights = {"xyz": opt.xyz_neighbor_weight, 
+                            "features_dc": opt.features_dc_neighbor_weight, 
+                            "opacity": opt.opacity_neighbor_weight, 
+                            "scaling": opt.scaling_neighbor_weight, 
+                            "rotation": opt.rotation_neighbor_weight}
+                
+                weight_sum = sum(weights.values())
+                for attr_name, attr_weight in weights.items():
+                    if attr_weight > 0:
+                        nb_losses.append(gaussians.neighborloss_2d(attr_getter_fn(attr_name), opt) * attr_weight / weight_sum)
+                
+                nb_loss = opt.lambda_neighbor * sum(nb_losses)
+                loss += nb_loss
+        
         loss/=opt.batch_size
         loss.backward()
         iter_end.record()
@@ -105,7 +128,7 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}, point cound: {scene.gaussians.get_xyz.shape[0]}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f}, Count: {scene.gaussians.get_xyz.shape[0]}, Nb loss: {nb_loss.item():.{3}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -125,7 +148,9 @@ def training(dataset, opt, pipe, load_iteration, testing_iterations, saving_iter
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
-                
+                    gaussians.prune_to_square_shape()
+                    gaussians.sort_into_grid(dataset, True)
+                        
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 

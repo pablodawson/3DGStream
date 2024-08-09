@@ -1,0 +1,20 @@
+{
+"sh_degree": 1, 
+"iterations": 500, 
+"iterations_s2": 250, 
+"depth_smooth": 0.0,
+ "densification_interval": 20,
+"densify_from_iter": 130, 
+"batch_size": 1, 
+"spawn_type": "spawn", 
+"s2_type": "spawn", 
+"s2_adding": true, 
+"num_of_split": 1, 
+"num_of_spawn": 2, 
+"std_scale": 2, 
+"min_opacity": 0.01,
+"bwd_depth": false, 
+"opt_type": "3DGStream", 
+"frame_start": 0, 
+"frame_end": 239
+}
