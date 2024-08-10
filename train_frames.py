@@ -157,84 +157,87 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
                 torch.save((gaussians.capture(), iteration), scene.output_path + "/chkpnt" + str(iteration) + ".pth")
 
     s1_end_time=time.time()
-    # Densify
+
+    scene.dump_NTC()
+
     if(opt.iterations_s2>0):
-    # Dump the NTC
-        scene.dump_NTC()
-    # Update Gaussians by NTC
         gaussians.update_by_ntc()
-    # Prune, Clone and setting up  
+        # Prune, Clone and setting up  
         gaussians.training_one_frame_s2_setup(opt)
         progress_bar = tqdm(range(opt.iterations, opt.iterations + opt.iterations_s2), desc="Training progress of Stage 2")    
     
-    # Train the new Gaussians
-    for iteration in range(opt.iterations + 1, opt.iterations + opt.iterations_s2 + 1):        
-        iter_start.record()
-                     
-        # Update Learning Rate
-        # gaussians.update_learning_rate(iteration)
-        
-        loss = torch.tensor(0.).cuda()
-        
-        for batch_iteraion in range(opt.batch_size):
-        
-            # Pick a random Camera
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        # Train the new Gaussians
+        for iteration in range(opt.iterations + 1, opt.iterations + opt.iterations_s2 + 1):        
+            iter_start.record()
+                        
+            # Update Learning Rate
+            # gaussians.update_learning_rate(iteration)
             
-            # Render
-            if (iteration - 1) == debug_from:
-                pipe.debug = True
-            render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-            image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["depth"],render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-            # Loss
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 = l1_loss(image, gt_image)
-            loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+            loss = torch.tensor(0.).cuda()
             
-        loss/=opt.batch_size
-        loss.backward()
-        iter_end.record()
-
-        with torch.no_grad():
-            # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if (iteration - opt.iterations) % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]}"})
-                progress_bar.update(10)
-            if iteration == opt.iterations + opt.iterations_s2:
-                progress_bar.close()
-
-            # Log and save
-            s2_res = training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
-            if s2_res is not None:
-                last_s2_res.append(s2_res)
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration=iteration, save_type='added')
-                      
-            # Densification
-            if (iteration - opt.iterations) % opt.densification_interval == 0:
-                gaussians.adding_and_prune(opt,scene.cameras_extent)
+            for batch_iteraion in range(opt.batch_size):
+            
+                # Pick a random Camera
+                if not viewpoint_stack:
+                    viewpoint_stack = scene.getTrainCameras().copy()
+                viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
                 
-                             
-            # Optimizer step
-            if iteration < opt.iterations + opt.iterations_s2:
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+                # Render
+                if (iteration - 1) == debug_from:
+                    pipe.debug = True
+                render_pkg = render(viewpoint_cam, gaussians, pipe, background)
+                image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["depth"],render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                # Loss
+                gt_image = viewpoint_cam.original_image.cuda()
+                Ll1 = l1_loss(image, gt_image)
+                loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+                
+            loss/=opt.batch_size
+            loss.backward()
+            iter_end.record()
 
-    gaussians.apply_added_points()
+            with torch.no_grad():
+                # Progress bar
+                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+                if (iteration - opt.iterations) % 10 == 0:
+                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]}"})
+                    progress_bar.update(10)
+                if iteration == opt.iterations + opt.iterations_s2:
+                    progress_bar.close()
+
+                # Log and save
+                s2_res = training_report(tb_writer, iteration, Ll1, Lds, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+                if s2_res is not None:
+                    last_s2_res.append(s2_res)
+                if (iteration in saving_iterations):
+                    print("\n[ITER {}] Saving Gaussians".format(iteration))
+                    scene.save(iteration=iteration, save_type='added')
+                        
+                # Densification
+                if (iteration - opt.iterations) % opt.densification_interval == 0:
+                    gaussians.adding_and_prune(opt,scene.cameras_extent)
+                    
+                                
+                # Optimizer step
+                if iteration < opt.iterations + opt.iterations_s2:
+                    gaussians.optimizer.step()
+                    gaussians.optimizer.zero_grad(set_to_none = True)
+
+        # gaussians.apply_added_points()
+    
     gaussians.prune_to_square_shape()
     gaussians.sort_into_grid(dataset, True)
+
+    sorted_model_path = os.path.join(scene.output_path, "point_cloud", "grid_sorted")
+    os.makedirs(sorted_model_path, exist_ok = True)
+
+    gaussians.save_ply(os.path.join(sorted_model_path, "point_cloud.ply"), save_type="origin")
     
     s2_end_time=time.time()
     
     pre_time = s1_start_time - start_time
     s1_time = s1_end_time - s1_start_time
     s2_time = s2_end_time - s1_end_time
-
-    # TODO: Export current frame gaussians as image
            
     return last_s1_res, last_s2_res, pre_time, s1_time, s2_time
 

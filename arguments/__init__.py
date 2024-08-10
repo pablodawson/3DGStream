@@ -109,7 +109,7 @@ class OptimizationParams(ParamGroup):
         self.ntc_lr = None
         self.lambda_dxyz = 0.0
         self.lambda_drot= 0.0
-        self.densification_interval = 300
+        self.densification_interval = 350
         self.opacity_reset_interval = 100000
         self.densify_from_iter = 500
         self.densify_until_iter = 4000

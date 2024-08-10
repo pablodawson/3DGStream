@@ -259,7 +259,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--read_config", action='store_true', default=False)
+    parser.add_argument("--read_config", action='store_true', default=True)
     parser.add_argument("--config_path", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
     if args.output_path == "":
