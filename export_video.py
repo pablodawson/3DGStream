@@ -1,4 +1,5 @@
 from utils.sh_utils import SH2RGB
+from utils.system_utils import searchForMaxIteration
 import glob
 import os
 import torch
@@ -66,13 +67,27 @@ def to_numpy_img(tensor):
     return attr_tensor
     
 
-def create_frame_image(pc, xyz_min=-1, xyz_max=1):
+def xyz_experiment(pc, xyz_min, xyz_max):
+
+    means3D = pc.get_xyz
+    xyz = to_numpy_img(means3D)
+    xyz = ((xyz - xyz_min) / (xyz_max - xyz_min))
+    xyz = (xyz.clip(0, 1) * 65535).astype(np.uint16)
+
+    xyz_lsbs = (xyz & 0x00FF).astype(np.uint8)
+    xyz_msbs = (xyz >> 8).astype(np.uint8)
+
+    concat = np.concatenate((xyz_lsbs, xyz_msbs), axis=1)
+
+    return concat
+
+
+def create_frame_image(pc, xyz_min=-1, xyz_max=1, store_features=True):
     ##
     opacities_final = pc._opacity
     means3D = pc.get_xyz
-    colors_final = SH2RGB(pc._features_dc)
-    rotations_final = pc.get_rotations
-
+    
+    rotations_final = pc._rotation
     
     # xyz 
     xyz = to_numpy_img(means3D)
@@ -80,8 +95,15 @@ def create_frame_image(pc, xyz_min=-1, xyz_max=1):
     xyz = (xyz.clip(0, 1) * 65535).astype(np.uint16)
 
     # colors
-    colors = to_numpy_img(colors_final)
-    colors = ((colors - min_thresholds["_colors"]) / (max_thresholds["_colors"] - min_thresholds["_colors"])).clip(0,1) * 65535
+    if (store_features):
+        colors_final = pc._features_dc
+        colors = to_numpy_img(colors_final)
+        colors = ((colors - min_thresholds["_features_dc"]) / (max_thresholds["_features_dc"] - min_thresholds["_features_dc"])).clip(0,1) * 65535
+    else:
+        colors_final = SH2RGB(pc._features_dc)
+        colors = to_numpy_img(colors_final)
+        colors = ((colors - min_thresholds["_colors"]) / (max_thresholds["_colors"] - min_thresholds["_colors"])).clip(0,1) * 65535
+    
     colors = colors.astype(np.uint16)
 
     # rotations
@@ -104,9 +126,9 @@ def create_frame_image(pc, xyz_min=-1, xyz_max=1):
     opacities = ((opacities - min_thresholds["_opacity"]) / (max_thresholds["_opacity"] - min_thresholds["_opacity"])).clip(0,1) * 65535
     opacities = opacities.astype(np.uint16)
     
-    # TODO: Separate xyz in LSB and MSB, rotation as euler angles instead
-    
-    ones = np.ones((xyz.shape[0], xyz.shape[1], 1), dtype=np.uint16) * 65535
+    # TODO: Maybe separate xyz in LSB and MSB, rotation as euler angles instead
+
+    #ones = np.ones((xyz.shape[0], xyz.shape[1], 1), dtype=np.uint16) * 65535
     opacities_3 = np.concatenate((opacities, opacities, opacities), axis=2)
     rot_part1 = q1q2_1
     rot_part2 = q3q4_1
@@ -128,6 +150,11 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    parser.add_argument('--frame_start', type=int, default=0)
+    parser.add_argument('--frame_end', type=int, default=239)
+    parser.add_argument("--read_config", action='store_true', default=True)
+    parser.add_argument("--config_path", type=str, default = "configs/train/main.json")
+
     args = parser.parse_args(sys.argv[1:])
     dataset = lp.extract(args)
     opt = op.extract(args)
@@ -146,18 +173,27 @@ if __name__ == "__main__":
 
     sorted_frames = sorted_frames[:-1]
 
-    for idx, frame in enumerate(sorted_frames):
+    gaussians = GaussianModel(dataset.sh_degree,opt.rotate_sh)
+
+    # Load the first frame, or edited first frame if it exists
+    edited_ply_path = os.path.join(args.output_path, "edited", "point_cloud.ply")
+
+    if os.path.exists(edited_ply_path):
+        gaussians.load_ply(edited_ply_path) 
+    else:
+        iteration = searchForMaxIteration(os.path.join(sorted_frames[0]), "point_cloud")
+        gaussians.load_ply(os.path.join(sorted_frames[0], "point_cloud", "iteration_" +str(iteration), "point_cloud.ply"))
+    
+    gaussians.prune_to_square_shape()
+
+    for idx, frame in tqdm(enumerate(sorted_frames), total=len(sorted_frames)):
         
         with torch.no_grad():
-            
-            gaussians = GaussianModel(dataset.sh_degree,opt.rotate_sh)
-            
-            gaussians.load_ply(os.path.join(args.output_path, frame,
-                                                            "point_cloud",
-                                                            "grid_sorted",
-                                                            "point_cloud.ply"))
-            gaussians.load_ntc(opt, dataset, ntc_path=os.path.join(args.output_path, "colmap_" + str(idx), "NTC.pth"))
+
+            gaussians.load_ntc(opt, dataset, ntc_path=os.path.join(frame, "NTC.pth"))
             gaussians.query_ntc()
+            gaussians.update_by_ntc()
+            gaussians.sort_into_grid(dataset, True)
 
             if xyz_min == 0 and xyz_max == 0:
                 xyz = gaussians.get_xyz.detach().cpu().numpy()
@@ -167,6 +203,7 @@ if __name__ == "__main__":
                 with open(os.path.join(outpath, "min_max.txt"), "w") as f:
                     f.write(f"{xyz_min},{xyz_max}")
             
+            #frame_image = xyz_experiment(gaussians, xyz_min, xyz_max)
             frame_image = create_frame_image(gaussians, xyz_min, xyz_max)
             cv2.imwrite(os.path.join(outpath, f"frame_{str(idx).zfill(5)}.png"), frame_image)
     
@@ -175,7 +212,7 @@ if __name__ == "__main__":
     # -x265-params lossless=1 for lossless
     (
         ffmpeg
-        .input(os.path.join(outpath, "frame_%05d.png"), framerate=args.fps)
+        .input(os.path.join(outpath, "frame_%05d.png"), framerate=fps)
         .output(os.path.join(outpath ,"scene.mkv"), pix_fmt="yuv420p10le",
                 vcodec="libx265", preset="medium", crf=5)
         .run()

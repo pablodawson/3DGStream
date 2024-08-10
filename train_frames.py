@@ -48,7 +48,6 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     gaussians.training_one_frame_setup(opt, dataset)
 
-    gaussians.prune_to_square_shape()
     #if dataset.sorting_enabled:
     #    gaussians.prune_to_square_shape()
     #    gaussians.sort_into_grid(dataset, True)
@@ -223,15 +222,15 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
 
-        # gaussians.apply_added_points()
     
-    gaussians.prune_to_square_shape()
-    gaussians.sort_into_grid(dataset, True)
+    # gaussians.prune_to_square_shape()
+    # gaussians.sort_into_grid(dataset, True)
 
-    sorted_model_path = os.path.join(scene.output_path, "point_cloud", "grid_sorted")
-    os.makedirs(sorted_model_path, exist_ok = True)
+    #sorted_model_path = os.path.join(scene.output_path, "point_cloud", "grid_sorted")
+    #os.makedirs(sorted_model_path, exist_ok = True)
 
-    gaussians.save_ply(os.path.join(sorted_model_path, "point_cloud.ply"), save_type="origin")
+    #gaussians.save_ply(os.path.join(sorted_model_path, "point_cloud.ply"), save_type="origin")
+    
     
     s2_end_time=time.time()
     
@@ -424,6 +423,8 @@ if __name__ == "__main__":
     serializable_namespace = {k: v for k, v in vars(args).items() if isinstance(v, (int, float, str, bool, list, dict, tuple, type(None)))}
     json_namespace = json.dumps(serializable_namespace)
     os.makedirs(args.output_path, exist_ok = True)
+    os.makedirs(os.path.join(args.output_path, "edited"), exist_ok = True)
+    
     with open(os.path.join(args.output_path, "cfg_args.json"), 'w') as f:
         f.write(json_namespace)
     train_frames(lp,op,pp,args)

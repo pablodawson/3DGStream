@@ -5,7 +5,7 @@ import tqdm
 
 parser = argparse.ArgumentParser(description='Preprocess equirect videos')
 
-parser.add_argument('--input', '-i', type=str, required=True, help='Path to input video')
+parser.add_argument('--source', '-s', type=str, required=True, help='Path to input video')
 parser.add_argument('--output', '-o', type=str, required=False, help='Path to output video')
 parser.add_argument('--start_time', type=str, default="00:00", help='Start time for trimming')
 parser.add_argument('--end_time', type=str, default="00:00", help='End time for trimming')
@@ -14,10 +14,10 @@ args = parser.parse_args()
 
 
 if args.output is None:
-    args.output = os.path.join(args.input, 'frames')
+    args.output = os.path.join(args.source, 'frames2')
     os.makedirs(args.output, exist_ok=True)
 
-input_path = args.input
+input_path = args.source
 
 videos = os.listdir(input_path)
 videos = [video for video in videos if video.endswith('.mp4')]
@@ -37,7 +37,7 @@ for i, video in tqdm.tqdm(enumerate(videos), total=len(videos)):
     face2 = input_split[0].filter("v360", "equirect", output="rectilinear", 
                         v_fov=fov, h_fov=fov, w='1100', h='1100', yaw=180, pitch=00)
 
-    all_faces = [face1]
+    all_faces = [face1, face2]
 
     for j, face in enumerate(all_faces):
         index = len(all_faces)*i + j

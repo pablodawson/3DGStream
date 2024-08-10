@@ -799,7 +799,7 @@ class GaussianModel:
         mask = mask.all(dim=1)
         ntc_inputs=torch.cat([normalzied_xyz[mask]],dim=-1)
         
-        noisy_inputs = ntc_inputs + 0.05 * torch.rand_like(ntc_inputs)
+        noisy_inputs = ntc_inputs + 0.03 * torch.rand_like(ntc_inputs)
         d_xyz_gt=torch.tensor([0.,0.,0.]).cuda()
         d_rot_gt=torch.tensor([1.,0.,0.,0.]).cuda()
         dummy_gt=torch.tensor([1.]).cuda()
@@ -817,6 +817,24 @@ class GaussianModel:
         torch.save(self.ntc.state_dict(), os.path.join(os.path.dirname(dataset.output_path), "ntc_init.pth"))
         print("NTC warm up done.")
             
+    def load_ntc(self, training_args, dataset, ntc_path):
+        ntc_conf_path=training_args.ntc_conf_path
+        
+        with open(ntc_conf_path) as ntc_conf_file:
+            ntc_conf = ctjs.load(ntc_conf_file)
+        if training_args.only_mlp:
+            model=tcnn.Network(n_input_dims=3, n_output_dims=8, network_config=ntc_conf["network"]).to(torch.device("cuda"))
+        else:
+            model=tcnn.NetworkWithInputEncoding(n_input_dims=3, n_output_dims=8, encoding_config=ntc_conf["encoding"], network_config=ntc_conf["network"]).to(torch.device("cuda"))
+        
+        self._xyz_bound_min = torch.tensor(dataset.min_bounds).cuda()
+        self._xyz_bound_max = torch.tensor(dataset.max_bounds).cuda()
+
+        self.ntc=NeuralTransformationCache(model,self.get_xyz_bound()[0],self.get_xyz_bound()[1])
+
+        self.ntc.load_state_dict(torch.load(ntc_path))
+    
+
     def training_one_frame_setup(self,training_args, dataset):
         ntc_conf_path=training_args.ntc_conf_path
         with open(ntc_conf_path) as ntc_conf_file:
