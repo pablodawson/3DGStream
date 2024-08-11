@@ -151,7 +151,7 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     parser.add_argument('--frame_start', type=int, default=0)
-    parser.add_argument('--frame_end', type=int, default=239)
+    parser.add_argument('--frame_end', type=int, default=74)
     parser.add_argument("--read_config", action='store_true', default=True)
     parser.add_argument("--config_path", type=str, default = "configs/train/main.json")
 

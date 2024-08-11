@@ -48,9 +48,10 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
     scene = Scene(dataset, gaussians, load_iteration=load_iteration, shuffle=False)
     gaussians.training_one_frame_setup(opt, dataset)
 
+    opt.lambda_neighbor = 0
     #if dataset.sorting_enabled:
-    #    gaussians.prune_to_square_shape()
-    #    gaussians.sort_into_grid(dataset, True)
+    #gaussians.prune_to_square_shape()
+    #gaussians.sort_into_grid(dataset, True)
     
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -94,7 +95,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
                 pipe.debug = True
             render_pkg = render(viewpoint_cam, gaussians, pipe, background)
             image, depth, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["depth"],render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-
+            
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image, gt_image)
@@ -127,7 +128,7 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]} Nb loss: {nb_loss.item():.{3}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{3}f} Point count: {gaussians.get_xyz.shape[0]}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
