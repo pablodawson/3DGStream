@@ -93,8 +93,8 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image, gt_image)
 
-            if (iteration % 200 == 0):
-                save_tensor_img(image,os.path.join(dataset.output_path,f'{iteration}_rendering'))
+            #if (iteration % 200 == 0):
+            #    save_tensor_img(image,os.path.join(dataset.output_path,f'{iteration}_rendering'))
 
             Lds = torch.tensor(0.).cuda()
             loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
@@ -360,18 +360,21 @@ def train_frames(lp, op, pp, args):
     model_path=args.model_path
     sub_paths = os.listdir(video_path)
     pattern = re.compile(r'colmap_(\d+)')
-    frames = sorted(
+    frames_all = sorted(
         (item for item in sub_paths if pattern.match(item)),
         key=lambda x: int(pattern.match(x).group(1))
     )
 
-    frames=frames[args.frame_start:args.frame_end]
+    frames=frames_all[args.frame_start:args.frame_end]
     if args.frame_start==0:
         if args.first_load_iteration!=-1:
             args.load_iteration = args.first_load_iteration
         else:
             args.load_iteration = searchForMaxIteration(os.path.join(model_path, "point_cloud"))
-    
+    else:
+        model_path = os.path.join(args.output_path, frames_all[args.frame_start-1])
+        args.load_iteration = searchForMaxIteration(os.path.join(model_path, "point_cloud"))
+
     for frame in frames:
         start_time = time.time()
         args.source_path = os.path.join(video_path, frame)

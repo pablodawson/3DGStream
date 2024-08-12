@@ -138,7 +138,9 @@ def create_frame_image(pc, xyz_min=-1, xyz_max=1, store_features=True):
     frame_image = np.concatenate((panel1, panel2), axis=0)
 
     if frame_image.shape[0] % 4 != 0:
-        frame_image = cv2.resize(frame_image, (frame_image.shape[1]//4*4, frame_image.shape[0]//4*4), interpolation=cv2.INTER_NEAREST)
+        # TODO: Best interpolation method? 
+        # Intuition: INTER_NEAREST means duplicating gaussians, INTER_LINEAR creates intermediate ones (maybe)
+        frame_image = cv2.resize(frame_image, (frame_image.shape[1]//4*4, frame_image.shape[0]//4*4), interpolation=cv2.INTER_LINEAR)
     
     return frame_image
 
