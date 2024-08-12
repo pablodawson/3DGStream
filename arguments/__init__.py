@@ -59,7 +59,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = True
 
-        self.min_bounds =[-7.0, -8.0, -9.0]
+        self.min_bounds =[-7.0, -4.0, -9.0]
         self.max_bounds =[22.0, 6.0, 17.0]
 
         # SOGS
@@ -114,7 +114,7 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 4000
         self.densify_grad_threshold = 0.0002
-        self.ntc_conf_path = "configs/cache/cache_F_8.json"
+        self.ntc_conf_path = "configs/cache/cache_F_2.json"
         self.ntc_path = ""
         self.batch_size = 1
         self.spawn_type = "spawn"

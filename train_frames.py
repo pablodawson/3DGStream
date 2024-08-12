@@ -70,13 +70,6 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
     # Train the NTC
     for iteration in range(first_iter, opt.iterations + 1):        
         iter_start.record()
-
-        # gaussians.update_learning_rate(iteration)
-
-        # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0:
-            gaussians.oneupSHdegree()
-                     
         # Query the NTC
         gaussians.query_ntc()
         
@@ -99,6 +92,10 @@ def training_one_frame(dataset, opt, pipe, load_iteration, testing_iterations, s
             # Loss
             gt_image = viewpoint_cam.original_image.cuda()
             Ll1 = l1_loss(image, gt_image)
+
+            if (iteration % 200 == 0):
+                save_tensor_img(image,os.path.join(dataset.output_path,f'{iteration}_rendering'))
+
             Lds = torch.tensor(0.).cuda()
             loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 

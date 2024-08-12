@@ -1,0 +1,21 @@
+Best so far: "eagle smaller" -> Densification interval: 500 densify always
+
+Next steps:
+- GSplat with MCMC Densification // no, bad results so far
+- Self organizing gaussians for storage
+- Rely on single config file, not per-model
+- NTC warmup within the training script
+- First load iteration default to max iter
+
+For exporting:
+- Select edited init splats
+- Load each frame ntc, deform, then export the frame
+
+
+With this we solve:
+- Editing: Just edit once and apply for all frames
+- Storage: State of the art compression - Even more so with video
+- Bounce artifacts: Non existent since no sections are used
+- Speed: 
+
+Idea: Initialize on previous NTC? Momentum should be kept in theory no?
